@@ -1,0 +1,317 @@
+//====Biblioteki====
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+//====inicjalizacja SDA/SCL
+#define I2C_SDA 8
+#define I2C_SCL 9
+
+// Ekran OLED - wstępna inicjalizacja
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1 
+#define SCREEN_ADDRESS 0x3C // Standardowy adres dla ekranów 0.96"
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+//====Silnik====
+bool pozycjeStol[6] = {false, false, false, false, false, false};
+const int STEPS_PER_SLOT = 342; // silnik 28BYJ-48 wartość obrotów - 2048/6 ~ 342
+int krok = 0;
+bool obiektWykryty =  false;
+int step_number = 0;
+const int IN_1 = 10;
+const int IN_2 = 11;
+const int IN_3 = 12;
+const int IN_4 = 13;
+
+//==== GPIO ====
+const int sensorPin = 2;
+const int buttonPinStop = 4;
+const int buttonPinStart = 5;
+
+
+const int przekaznikIN2 = 42;
+
+const int potPin = 1;
+
+bool lastButtonStateStart = HIGH;
+bool lastButtonStateStop = HIGH;
+//===Ekran filtracja===
+unsigned long lastPotUpdate = 0;
+unsigned long lastScreenUpdate = 0;
+
+float adcFiltered = 0;
+int ml = 0;
+int poprzednieMl = -1;
+
+enum Ekran{
+  EKRAN_GLOWNY,
+  EKRAN_STARTOWY,
+  EKRAN_USTAWIENIA,
+  EKRAN_MENU,
+  EKRAN_SKANOWANIE,
+  EKRAN_NALEWANIE,
+};
+  Ekran aktualnyEkran = EKRAN_STARTOWY;
+void setup(){
+  Serial.begin(9600);
+  Wire.begin(I2C_SDA, I2C_SCL);
+  pinMode(IN_1, OUTPUT);
+  pinMode(IN_2, OUTPUT);
+  pinMode(IN_3, OUTPUT);
+  pinMode(IN_4, OUTPUT);
+  pinMode(sensorPin, INPUT);
+  pinMode(buttonPinStop, INPUT_PULLUP);
+  pinMode(buttonPinStart, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(buttonPinStop), buttonStopISR, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(buttonPinStart), buttonStartISR, CHANGE);
+
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)){
+    for(;;);
+  }
+
+  display.clearDisplay();
+  display.display();
+  adcFiltered = analogRead(potPin);
+}
+void loop() {
+  int potenciometerValue = analogRead(potPin);
+  bool buttonStateStop = digitalRead(buttonPinStop);
+  bool buttonStateStart = digitalRead(buttonPinStart);
+//===Ekran filtracja===
+if (millis() - lastPotUpdate >= 30) {   // odczyt potencjometru co 30 ms
+    lastPotUpdate = millis();
+
+    int raw = analogRead(potPin);
+    adcFiltered = 0.8 * adcFiltered + 0.2 * raw;   // filtr wygładzający
+    ml = map((int)adcFiltered, 0, 4095, 0, 50);}
+//=============================================================================
+
+      if (digitalRead(buttonPinStart) == LOW && aktualnyEkran == EKRAN_STARTOWY) {
+      aktualnyEkran = EKRAN_SKANOWANIE;
+      }
+            if (digitalRead(buttonPinStart) == LOW && aktualnyEkran == EKRAN_GLOWNY) {
+      aktualnyEkran = EKRAN_NALEWANIE;
+      }
+            if (digitalRead(buttonPinStop) == LOW && aktualnyEkran == EKRAN_STARTOWY) {
+      aktualnyEkran = EKRAN_USTAWIENIA;
+      }
+switch (aktualnyEkran) {
+    case EKRAN_STARTOWY:
+      ekranStartowy();
+      break;
+
+    case EKRAN_GLOWNY:
+      ekranGlowny(ml);
+      break;
+
+    case EKRAN_USTAWIENIA:
+      ekranUstawiania();
+      break;
+
+    case EKRAN_SKANOWANIE:
+      ekranSkanowanie();
+      skanujStol();
+      aktualnyEkran = EKRAN_GLOWNY;
+      break;
+
+    case EKRAN_NALEWANIE:
+      ekranNalewanie();
+      break;
+  }
+}
+void wykonajRuch(bool dir){
+  if (dir){
+  switch(krok){
+      case 0:
+      digitalWrite(IN_1, HIGH);
+      digitalWrite(IN_2, LOW);
+      digitalWrite(IN_3, LOW);
+      digitalWrite(IN_4, LOW);
+      break;
+    case 1:
+      digitalWrite(IN_1, LOW);
+      digitalWrite(IN_2, HIGH);
+      digitalWrite(IN_3, LOW);
+      digitalWrite(IN_4, LOW);
+      break;
+    case 2:
+      digitalWrite(IN_1, LOW);
+      digitalWrite(IN_2, LOW);
+      digitalWrite(IN_3, HIGH);
+      digitalWrite(IN_4, LOW);
+      break;
+    case 3:
+      digitalWrite(IN_1, LOW);
+      digitalWrite(IN_2, LOW);
+      digitalWrite(IN_3, LOW);
+      digitalWrite(IN_4, HIGH);
+      break;
+      }
+  }
+  else{
+    switch(krok){
+     case 0:
+        digitalWrite(IN_1, LOW);
+        digitalWrite(IN_2, LOW);
+        digitalWrite(IN_3, LOW);
+        digitalWrite(IN_4, HIGH);
+        break;
+      case 1:
+        digitalWrite(IN_1, LOW);
+        digitalWrite(IN_2, LOW);
+        digitalWrite(IN_3, HIGH);
+        digitalWrite(IN_4, LOW);
+        break;
+      case 2:
+        digitalWrite(IN_1, LOW);
+        digitalWrite(IN_2, HIGH);
+        digitalWrite(IN_3, LOW);
+        digitalWrite(IN_4, LOW);
+        break;
+      case 3:
+        digitalWrite(IN_1, HIGH);
+        digitalWrite(IN_2, LOW);
+        digitalWrite(IN_3, LOW);
+        digitalWrite(IN_4, LOW);
+        break;
+    }
+  }
+  krok++;
+  if (krok > 3) {
+    krok = 0;
+  }
+}
+void wylaczSilnik(){
+  digitalWrite(IN_1, LOW);
+  digitalWrite(IN_2, LOW);
+  digitalWrite(IN_3, LOW);
+  digitalWrite(IN_4, LOW);
+}
+void skanujStol(){
+  for(int i = 0; i < 6; i++){
+    delay(300);
+    pozycjeStol[i] = czyJestElement();
+  Serial.print("Pozycja ");
+    Serial.print(i);
+    Serial.print(": ");
+    if (pozycjeStol[i]) {
+      Serial.println("ELEMENT JEST");
+    } else {
+      Serial.println("BRAK");
+    }
+     if (i < 5) {
+      Obroc60Stopni();
+    }
+    }
+  wylaczSilnik();
+}
+bool czyJestElement(){
+  if(digitalRead(sensorPin) == HIGH){
+    return true;
+    }
+  else{
+    return false;
+  }
+}
+void wypiszPozycje() {
+  for (int i = 0; i < 6; i++) {
+    Serial.print("Slot ");
+    Serial.print(i);
+    Serial.print(" -> ");
+    if (pozycjeStol[i]) {
+      Serial.println("1");
+    } else {
+      Serial.println("0");
+    }
+  }
+}
+void Obroc60Stopni(){
+  for(int i = 0; i < STEPS_PER_SLOT; i++){
+  wykonajRuch(true);
+  delay(3);
+  }
+}
+void buttonStartISR(){
+
+}
+void buttonStopISR(){
+  
+}
+void sterowaniePompa(){
+
+}
+//====Funkcje Ekranu
+void ekranSkanowanie() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.print("Skanowanie stolu...");
+  display.display();
+}
+  void ekranStartowy() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(4, 20);
+  display.print("Ustaw kieliszki");
+  display.setCursor(4, 35);
+  display.print("i nacisnij START");
+  display.display();
+}
+
+void ekranGlowny(int ml) {
+  if (millis() - lastScreenUpdate < 80) return;   // odswiezaj max co 80 ms
+  lastScreenUpdate = millis();
+
+  if (ml == poprzednieMl) return;   // nic sie nie zmienilo, nie rysuj od nowa
+  poprzednieMl = ml;
+
+  display.clearDisplay();
+
+  // napis AUTO
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+  display.setCursor(4, 4);
+  display.print("AUTO");
+
+  // ikonka "nalewania" u gory
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(58, 4);
+  display.print("(*)");
+
+  // prosta ikonka baterii
+  display.drawRect(104, 3, 20, 10, SSD1306_WHITE);
+  display.fillRect(124, 5, 2, 6, SSD1306_WHITE);
+  display.fillRect(106, 5, 14, 6, SSD1306_WHITE);
+
+  // duza wartosc
+  display.setTextSize(5);
+  display.setCursor(10, 18);
+  display.print(ml);
+
+  // jednostka ml
+  display.setTextSize(3);
+  display.setCursor(78, 36);
+  display.print("mL");
+  //menu 
+  display.display();
+}
+void ekranUstawiania(){
+
+}
+
+void ekranNalewanie(){
+
+}
+/*====Funkcje====
+-Nalewanie grawitacyjne
+-przez zbiornik pośredni
+-
+
+Nalewanie - stycznik i czas oznaczony przez ustawienie potencjometru
+Animacje ekranu
+Powrot do pozycji 0??? do przemyslenia
+menu plus easter egg w postaci gry w menu
+*/
+

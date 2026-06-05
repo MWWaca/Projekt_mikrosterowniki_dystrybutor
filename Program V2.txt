@@ -1,0 +1,178 @@
+//====Biblioteki====
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+//====inicjalizacja SDA/SCL
+#define I2C_SDA 8
+#define I2C_SCL 9
+
+// Ekran OLED - wstępna inicjalizacja
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1 
+#define SCREEN_ADDRESS 0x3C // Standardowy adres dla ekranów 0.96"
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+//====Silnik====
+bool pozycjeStol[6] = {false, false, false, false, false, false};
+const int STEPS_PER_SLOT = 342; // silnik 28BYJ-48 wartość obrotów - 2048/6 ~ 342
+int krok = 0;
+bool obiektWykryty =  false;
+int step_number = 0;
+const int IN_1 = 9;
+const int IN_2 = 10;
+const int IN_3 = 11;
+const int IN_4 = 12;
+
+//==== GPIO ====
+const int sensorPin = 2;
+const int buttonPinStop = 3;
+const int buttonPinStart = 4;
+const int greenLedPin = 7;
+const int redLedPin = 6;
+
+const int przekaznikIN1 = 13;
+const int przekaznikIN2 = 14;
+
+bool lastButtonStateStart = HIGH;
+bool lastButtonStateStop = HIGH;
+
+void setup(){
+  Serial.begin(9600);
+  pinMode(IN_1, OUTPUT);
+  pinMode(IN_2, OUTPUT);
+  pinMode(IN_3, OUTPUT);
+  pinMode(IN_4, OUTPUT);
+  pinMode(sensorPin, INPUT);
+  pinMode(buttonPinStop, INPUT_PULLUP);
+  pinMode(buttonPinStart, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(buttonPinStop), buttonStopISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(buttonPinStart), buttonStartISR, CHANGE);
+}
+void loop() {
+  int potenciometerValue = analogRead(A0);
+  bool buttonStateStop = digitalRead(buttonPinStop);
+  bool buttonStateStart = digitalRead(buttonPinStart);
+
+}
+void wykonajRuch(bool dir){
+  if (dir){
+  switch(krok){
+      case 0:
+      digitalWrite(IN_1, HIGH);
+      digitalWrite(IN_2, LOW);
+      digitalWrite(IN_3, LOW);
+      digitalWrite(IN_4, LOW);
+      break;
+    case 1:
+      digitalWrite(IN_1, LOW);
+      digitalWrite(IN_2, HIGH);
+      digitalWrite(IN_3, LOW);
+      digitalWrite(IN_4, LOW);
+      break;
+    case 2:
+      digitalWrite(IN_1, LOW);
+      digitalWrite(IN_2, LOW);
+      digitalWrite(IN_3, HIGH);
+      digitalWrite(IN_4, LOW);
+      break;
+    case 3:
+      digitalWrite(IN_1, LOW);
+      digitalWrite(IN_2, LOW);
+      digitalWrite(IN_3, LOW);
+      digitalWrite(IN_4, HIGH);
+      break;
+      }
+  }
+  else{
+    switch(krok){
+     case 0:
+        digitalWrite(IN_1, LOW);
+        digitalWrite(IN_2, LOW);
+        digitalWrite(IN_3, LOW);
+        digitalWrite(IN_4, HIGH);
+        break;
+      case 1:
+        digitalWrite(IN_1, LOW);
+        digitalWrite(IN_2, LOW);
+        digitalWrite(IN_3, HIGH);
+        digitalWrite(IN_4, LOW);
+        break;
+      case 2:
+        digitalWrite(IN_1, LOW);
+        digitalWrite(IN_2, HIGH);
+        digitalWrite(IN_3, LOW);
+        digitalWrite(IN_4, LOW);
+        break;
+      case 3:
+        digitalWrite(IN_1, HIGH);
+        digitalWrite(IN_2, LOW);
+        digitalWrite(IN_3, LOW);
+        digitalWrite(IN_4, LOW);
+        break;
+    }
+  }
+  krok++;
+  if (krok > 3) {
+    krok = 0;
+  }
+}
+void wylaczSilnik(){
+  digitalWrite(IN_1, LOW);
+  digitalWrite(IN_2, LOW);
+  digitalWrite(IN_3, LOW);
+  digitalWrite(IN_4, LOW);
+}
+void skanujStol(){
+  for(int i = 0; i < 6; i++){
+    delay(300);
+    pozycjeStol[i] = czyJestElement();
+  Serial.print("Pozycja ");
+    Serial.print(i);
+    Serial.print(": ");
+    if (pozycjeStol[i]) {
+      Serial.println("ELEMENT JEST");
+    } else {
+      Serial.println("BRAK");
+    }
+     if (i < 5) {
+      Obroc60Stopni();
+    }
+    }
+  wylaczSilnik();
+}
+bool czyJestElement(){
+  if(digitalRead(sensorPin == HIGH)){
+    return true;
+    }
+  else{
+    return false;
+  }
+}
+void wypiszPozycje() {
+  for (int i = 0; i < 6; i++) {
+    Serial.print("Slot ");
+    Serial.print(i);
+    Serial.print(" -> ");
+    if (pozycjeStol[i]) {
+      Serial.println("1");
+    } else {
+      Serial.println("0");
+    }
+  }
+}
+void Obroc60Stopni(){
+  for(int i = 0; i < STEPS_PER_SLOT; i++)
+  wykonajRuch(true);
+  delay(3);
+}
+void buttonStartISR(){
+
+}
+void buttonStopISR(){
+  
+}
+voud sterowaniePompa(){
+
+}
+
