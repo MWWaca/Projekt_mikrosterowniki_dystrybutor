@@ -1,0 +1,135 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+const int potPin = A0;
+const int buttonPin = 2;
+
+const int IN1 = 8;
+const int IN2 = 9;
+const int IN3 = 10;
+const int IN4 = 11;
+
+bool lastButtonState = HIGH;
+int stepNumber = 0;
+
+unsigned long lastLcdUpdate = 0;
+float filteredAdc = 0;
+
+void setup() {
+  pinMode(buttonPin, INPUT_PULLUP);
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  wylaczSilnik();
+
+  lcd.init();
+  lcd.backlight();
+
+  filteredAdc = analogRead(potPin);
+
+  lcd.setCursor(0, 0);
+  lcd.print("Ustaw ilosc");
+  lcd.setCursor(0, 1);
+  lcd.print("0 ml");
+}
+
+void loop() {
+  bool buttonState = digitalRead(buttonPin);
+
+  int raw = analogRead(potPin);
+  filteredAdc = 0.8 * filteredAdc + 0.2 * raw;
+  int ml = map((int)filteredAdc, 0, 1023, 0, 50);
+
+  if (millis() - lastLcdUpdate >= 100) {
+    lastLcdUpdate = millis();
+
+    lcd.setCursor(0, 0);
+    lcd.print("Do nalania:    ");
+    lcd.setCursor(0, 1);
+    lcd.print("                ");
+    lcd.setCursor(0, 1);
+    lcd.print(ml);
+    lcd.print(" ml");
+  }
+
+  if (lastButtonState == HIGH && buttonState == LOW) {
+    nalej(ml);
+  }
+
+  lastButtonState = buttonState;
+}
+
+void nalej(int ml) {
+  unsigned long czasPracy = ml * 100UL;   // 1 ml = 100 ms
+  unsigned long startTime = millis();
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Nalewanie...");
+  lcd.setCursor(0, 1);
+  lcd.print(ml);
+  lcd.print(" ml");
+
+  while (millis() - startTime < czasPracy) {
+    wykonajKrokPrawo();
+    delay(3);
+  }
+
+  wylaczSilnik();
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Gotowe");
+  lcd.setCursor(0, 1);
+  lcd.print("Nalano ");
+  lcd.print(ml);
+  lcd.print(" ml");
+
+  delay(1500);
+}
+
+void wykonajKrokPrawo() {
+  switch (stepNumber) {
+    case 0:
+      digitalWrite(IN1, HIGH);
+      digitalWrite(IN2, LOW);
+      digitalWrite(IN3, LOW);
+      digitalWrite(IN4, LOW);
+      break;
+    case 1:
+      digitalWrite(IN1, LOW);
+      digitalWrite(IN2, HIGH);
+      digitalWrite(IN3, LOW);
+      digitalWrite(IN4, LOW);
+      break;
+    case 2:
+      digitalWrite(IN1, LOW);
+      digitalWrite(IN2, LOW);
+      digitalWrite(IN3, HIGH);
+      digitalWrite(IN4, LOW);
+      break;
+    case 3:
+      digitalWrite(IN1, LOW);
+      digitalWrite(IN2, LOW);
+      digitalWrite(IN3, LOW);
+      digitalWrite(IN4, HIGH);
+      break;
+  }
+
+  stepNumber++;
+  if (stepNumber > 3) {
+    stepNumber = 0;
+  }
+}
+
+void wylaczSilnik() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+}
