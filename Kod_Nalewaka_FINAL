@@ -1,0 +1,753 @@
+// ==== Biblioteki ====
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// ==== Inicjalizacja SDA/SCL ====
+#define I2C_SDA 8
+#define I2C_SCL 9
+
+// ==== Ekran OLED ====
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define SCREEN_ADDRESS 0x3C
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// ==== Silnik 28BYJ-48 ====
+const long STEPS_PER_MOTOR_REV = 2048;
+const int SMALL_GEAR_TEETH = 13;
+const int TABLE_GEAR_TEETH = 92;
+
+const long TABLE_STEPS_THEORETICAL =
+  (STEPS_PER_MOTOR_REV * TABLE_GEAR_TEETH) / SMALL_GEAR_TEETH;
+
+const long TOTAL_STEPS = 13000;
+
+const int STEP_DELAY_SCAN_MS = 1;
+const int STEP_DELAY_MOVE_MS = 4;
+
+int krok = 0;
+long aktualnaPozycjaSilnika = 0;
+
+const int IN_1 = 10;
+const int IN_2 = 11;
+const int IN_3 = 12;
+const int IN_4 = 13;
+
+// ==== Laser i skanowanie ====
+const int sensorPinAnalog = 6;
+const int laserPin = 2;
+
+const int PROG_WEJSCIA = 1800;
+const int PROG_WYJSCIA = 1700;
+
+const int LICZBA_PROBEK = 8;
+const int MIN_SZEROKOSC = 10;
+
+long pozycjeSrodkow[8];
+int znalezionaLiczbaKieliszkow = 0;
+
+int ostatniOdczytLasera = 0;
+bool aktualnieWidziKieliszek = false;
+
+unsigned long lastSerialDebug = 0;
+unsigned long lastOledDebug = 0;
+unsigned long lastPhotoPrint = 0;
+
+// ==== GPIO ====
+const int buttonPinStart = 5;
+const int przekaznikIN2 = 42;
+const int potPin = 1;
+
+// ==== Zmienne ekranu i filtracji ====
+unsigned long lastPotUpdate = 0;
+unsigned long lastScreenUpdate = 0;
+
+float adcFiltered = 0;
+int ml = 0;
+int poprzednieMl = -1;
+
+// ==== Zmienne do nalewania ====
+const int CZAS_NA_1_ML = 120;
+
+// ==== Maszyna stanów ====
+enum Ekran {
+  EKRAN_GLOWNY,
+  EKRAN_STARTOWY,
+  EKRAN_USTAWIENIA,
+  EKRAN_MENU,
+  EKRAN_SKANOWANIE,
+  EKRAN_NALEWANIE,
+};
+
+Ekran aktualnyEkran = EKRAN_STARTOWY;
+
+// ==== Deklaracje funkcji ====
+void skanujIKalibrujStol();
+void wykonajRuch(bool dir);
+void wylaczSilnik();
+void ekranPozycjeKieliszkow();
+void ekranSkanowanieDebug(int adc, bool wykryty);
+void ekranStartowy();
+void ekranGlowny(int ml);
+void ekranUstawiania();
+void pokazDebugSerial(int adc, bool wykryty);
+void ekranNalewanie();
+int odczytajFotoSrednio();
+void dojedzDoPozycji(long pozycjaDocelowa);
+void nalejMl(int iloscMl);
+
+// ==== Setup ====
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(I2C_SDA, I2C_SCL);
+
+  pinMode(IN_1, OUTPUT);
+  pinMode(IN_2, OUTPUT);
+  pinMode(IN_3, OUTPUT);
+  pinMode(IN_4, OUTPUT);
+  wylaczSilnik();
+
+  pinMode(przekaznikIN2, OUTPUT);
+  digitalWrite(przekaznikIN2, LOW);
+
+  pinMode(laserPin, OUTPUT);
+  digitalWrite(laserPin, HIGH);
+
+  pinMode(sensorPinAnalog, INPUT);
+  pinMode(potPin, INPUT);
+  pinMode(buttonPinStart, INPUT_PULLUP);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println("Nie znaleziono ekranu OLED");
+    for (;;);
+  }
+
+  display.clearDisplay();
+  display.display();
+
+  adcFiltered = analogRead(potPin);
+
+  Serial.println("================================");
+  Serial.println("START PROGRAMU");
+  Serial.print("TABLE_STEPS_THEORETICAL = ");
+  Serial.println(TABLE_STEPS_THEORETICAL);
+  Serial.print("TOTAL_STEPS = ");
+  Serial.println(TOTAL_STEPS);
+  Serial.print("STEP_DELAY_SCAN_MS = ");
+  Serial.println(STEP_DELAY_SCAN_MS);
+  Serial.print("STEP_DELAY_MOVE_MS = ");
+  Serial.println(STEP_DELAY_MOVE_MS);
+  Serial.print("PROG_WEJSCIA = ");
+  Serial.println(PROG_WEJSCIA);
+  Serial.print("PROG_WYJSCIA = ");
+  Serial.println(PROG_WYJSCIA);
+  Serial.print("CZAS_NA_1_ML = ");
+  Serial.println(CZAS_NA_1_ML);
+  Serial.println("================================");
+}
+
+// ==== Loop ====
+void loop() {
+  if (millis() - lastPhotoPrint >= 300) {
+    lastPhotoPrint = millis();
+
+    int wartosc = analogRead(sensorPinAnalog);
+
+    Serial.print("Fotorezystor ADC = ");
+    Serial.print(wartosc);
+    Serial.print(" | ml = ");
+    Serial.print(ml);
+    Serial.print(" | ekran = ");
+    Serial.print(aktualnyEkran);
+    Serial.print(" | pozycja = ");
+    Serial.println(aktualnaPozycjaSilnika);
+  }
+
+  if (millis() - lastPotUpdate >= 30) {
+    lastPotUpdate = millis();
+
+    int raw = analogRead(potPin);
+    adcFiltered = 0.8 * adcFiltered + 0.2 * raw;
+
+    ml = map((int)adcFiltered, 0, 4095, 0, 50);
+
+    if (ml < 0) ml = 0;
+    if (ml > 50) ml = 50;
+  }
+
+  if (digitalRead(buttonPinStart) == LOW && aktualnyEkran == EKRAN_STARTOWY) {
+    delay(300);
+    Serial.println("START -> SKANOWANIE");
+    aktualnyEkran = EKRAN_SKANOWANIE;
+
+    while (digitalRead(buttonPinStart) == LOW) {
+      delay(10);
+    }
+  }
+
+  if (digitalRead(buttonPinStart) == LOW && aktualnyEkran == EKRAN_GLOWNY) {
+    delay(300);
+    Serial.println("START -> NALEWANIE");
+    aktualnyEkran = EKRAN_NALEWANIE;
+
+    while (digitalRead(buttonPinStart) == LOW) {
+      delay(10);
+    }
+  }
+
+  switch (aktualnyEkran) {
+    case EKRAN_STARTOWY:
+      ekranStartowy();
+      break;
+
+    case EKRAN_GLOWNY:
+      ekranGlowny(ml);
+      break;
+
+    case EKRAN_USTAWIENIA:
+      ekranUstawiania();
+      break;
+
+    case EKRAN_SKANOWANIE:
+      skanujIKalibrujStol();
+      aktualnyEkran = EKRAN_GLOWNY;
+      poprzednieMl = -1;
+      break;
+
+    case EKRAN_NALEWANIE:
+      ekranNalewanie();
+      aktualnyEkran = EKRAN_STARTOWY;
+      poprzednieMl = -1;
+      break;
+
+    case EKRAN_MENU:
+      break;
+  }
+}
+
+// ==== Logika skanowania ====
+void skanujIKalibrujStol() {
+  znalezionaLiczbaKieliszkow = 0;
+  bool czyWidziKieliszek = false;
+  long poczatekKieliszka = 0;
+
+  aktualnaPozycjaSilnika = 0;
+  aktualnieWidziKieliszek = false;
+
+  for (int i = 0; i < 8; i++) {
+    pozycjeSrodkow[i] = -1;
+  }
+
+  Serial.println("================================");
+  Serial.println("Rozpoczynam skanowanie 360 stopni");
+  Serial.println("================================");
+
+  for (long licznikKrokow = 0; licznikKrokow < TOTAL_STEPS; licznikKrokow++) {
+    int wartoscLasera = odczytajFotoSrednio();
+    ostatniOdczytLasera = wartoscLasera;
+
+    if (!czyWidziKieliszek && wartoscLasera > PROG_WEJSCIA) {
+      aktualnieWidziKieliszek = true;
+    }
+    else if (czyWidziKieliszek && wartoscLasera < PROG_WYJSCIA) {
+      aktualnieWidziKieliszek = false;
+    }
+
+    bool wykryty = aktualnieWidziKieliszek;
+
+    pokazDebugSerial(wartoscLasera, wykryty);
+    ekranSkanowanieDebug(wartoscLasera, wykryty);
+
+    if (wykryty && !czyWidziKieliszek) {
+      czyWidziKieliszek = true;
+      poczatekKieliszka = aktualnaPozycjaSilnika;
+
+      Serial.print("START kieliszka na pozycji: ");
+      Serial.println(poczatekKieliszka);
+    }
+
+    if (!wykryty && czyWidziKieliszek) {
+      czyWidziKieliszek = false;
+
+      long koniecKieliszka = aktualnaPozycjaSilnika;
+      long szerokosc = koniecKieliszka - poczatekKieliszka;
+
+      if (szerokosc < 0) {
+        szerokosc += TOTAL_STEPS;
+      }
+
+      long srodek = poczatekKieliszka + szerokosc / 2;
+
+      if (srodek >= TOTAL_STEPS) {
+        srodek -= TOTAL_STEPS;
+      }
+
+      if (szerokosc >= MIN_SZEROKOSC && znalezionaLiczbaKieliszkow < 8) {
+        pozycjeSrodkow[znalezionaLiczbaKieliszkow] = srodek;
+
+        Serial.print("ZAPISANO kieliszek nr ");
+        Serial.print(znalezionaLiczbaKieliszkow + 1);
+        Serial.print(" | start: ");
+        Serial.print(poczatekKieliszka);
+        Serial.print(" | koniec: ");
+        Serial.print(koniecKieliszka);
+        Serial.print(" | srodek: ");
+        Serial.println(srodek);
+
+        znalezionaLiczbaKieliszkow++;
+      }
+    }
+
+    wykonajRuch(true);
+    delay(STEP_DELAY_SCAN_MS);
+  }
+
+  if (czyWidziKieliszek) {
+    long koniecKieliszka = TOTAL_STEPS - 1;
+    long szerokosc = koniecKieliszka - poczatekKieliszka;
+
+    if (szerokosc < 0) {
+      szerokosc += TOTAL_STEPS;
+    }
+
+    long srodek = poczatekKieliszka + szerokosc / 2;
+
+    if (srodek >= TOTAL_STEPS) {
+      srodek -= TOTAL_STEPS;
+    }
+
+    if (szerokosc >= MIN_SZEROKOSC && znalezionaLiczbaKieliszkow < 8) {
+      pozycjeSrodkow[znalezionaLiczbaKieliszkow] = srodek;
+
+      Serial.print("ZAPISANO kieliszek nr ");
+      Serial.print(znalezionaLiczbaKieliszkow + 1);
+      Serial.print(" | start: ");
+      Serial.print(poczatekKieliszka);
+      Serial.print(" | koniec: ");
+      Serial.print(koniecKieliszka);
+      Serial.print(" | srodek: ");
+      Serial.println(srodek);
+
+      znalezionaLiczbaKieliszkow++;
+    }
+  }
+
+  wylaczSilnik();
+
+  Serial.println("================================");
+  Serial.println("Skanowanie zakonczone");
+  Serial.print("Liczba kieliszkow: ");
+  Serial.println(znalezionaLiczbaKieliszkow);
+
+  for (int i = 0; i < znalezionaLiczbaKieliszkow; i++) {
+    Serial.print("Kieliszek ");
+    Serial.print(i + 1);
+    Serial.print(" -> pozycja srodka: ");
+    Serial.println(pozycjeSrodkow[i]);
+  }
+
+  Serial.println("================================");
+
+  ekranPozycjeKieliszkow();
+  delay(3000);
+}
+
+// ==== Funkcje silnika ====
+void wykonajRuch(bool dir) {
+  if (dir) {
+    switch (krok) {
+      case 0:
+        digitalWrite(IN_1, HIGH);
+        digitalWrite(IN_2, HIGH);
+        digitalWrite(IN_3, LOW);
+        digitalWrite(IN_4, LOW);
+        break;
+
+      case 1:
+        digitalWrite(IN_1, LOW);
+        digitalWrite(IN_2, HIGH);
+        digitalWrite(IN_3, HIGH);
+        digitalWrite(IN_4, LOW);
+        break;
+
+      case 2:
+        digitalWrite(IN_1, LOW);
+        digitalWrite(IN_2, LOW);
+        digitalWrite(IN_3, HIGH);
+        digitalWrite(IN_4, HIGH);
+        break;
+
+      case 3:
+        digitalWrite(IN_1, HIGH);
+        digitalWrite(IN_2, LOW);
+        digitalWrite(IN_3, LOW);
+        digitalWrite(IN_4, HIGH);
+        break;
+    }
+  } else {
+    switch (krok) {
+      case 0:
+        digitalWrite(IN_1, HIGH);
+        digitalWrite(IN_2, LOW);
+        digitalWrite(IN_3, LOW);
+        digitalWrite(IN_4, HIGH);
+        break;
+
+      case 1:
+        digitalWrite(IN_1, LOW);
+        digitalWrite(IN_2, LOW);
+        digitalWrite(IN_3, HIGH);
+        digitalWrite(IN_4, HIGH);
+        break;
+
+      case 2:
+        digitalWrite(IN_1, LOW);
+        digitalWrite(IN_2, HIGH);
+        digitalWrite(IN_3, HIGH);
+        digitalWrite(IN_4, LOW);
+        break;
+
+      case 3:
+        digitalWrite(IN_1, HIGH);
+        digitalWrite(IN_2, HIGH);
+        digitalWrite(IN_3, LOW);
+        digitalWrite(IN_4, LOW);
+        break;
+    }
+  }
+
+  krok++;
+
+  if (krok > 3) {
+    krok = 0;
+  }
+
+  if (dir) {
+    aktualnaPozycjaSilnika++;
+
+    if (aktualnaPozycjaSilnika >= TOTAL_STEPS) {
+      aktualnaPozycjaSilnika = 0;
+    }
+  } else {
+    aktualnaPozycjaSilnika--;
+
+    if (aktualnaPozycjaSilnika < 0) {
+      aktualnaPozycjaSilnika = TOTAL_STEPS - 1;
+    }
+  }
+}
+
+void wylaczSilnik() {
+  digitalWrite(IN_1, LOW);
+  digitalWrite(IN_2, LOW);
+  digitalWrite(IN_3, LOW);
+  digitalWrite(IN_4, LOW);
+}
+
+void dojedzDoPozycji(long pozycjaDocelowa) {
+  long krokiDoPrzejscia = pozycjaDocelowa - aktualnaPozycjaSilnika;
+
+  if (krokiDoPrzejscia < 0) {
+    krokiDoPrzejscia += TOTAL_STEPS;
+  }
+
+  Serial.print("Jade z pozycji: ");
+  Serial.print(aktualnaPozycjaSilnika);
+  Serial.print(" do pozycji: ");
+  Serial.print(pozycjaDocelowa);
+  Serial.print(" | kroki: ");
+  Serial.println(krokiDoPrzejscia);
+
+  for (long i = 0; i < krokiDoPrzejscia; i++) {
+    wykonajRuch(true);
+    delay(STEP_DELAY_MOVE_MS);
+  }
+
+  wylaczSilnik();
+
+  Serial.print("Dojechano. Aktualna pozycja: ");
+  Serial.println(aktualnaPozycjaSilnika);
+}
+
+// ==== Ekrany ====
+void ekranStartowy() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setCursor(4, 20);
+  display.print("Ustaw kieliszki");
+
+  display.setCursor(4, 35);
+  display.print("i nacisnij START");
+
+  display.display();
+}
+
+void ekranGlowny(int ml) {
+  if (millis() - lastScreenUpdate < 80) return;
+  lastScreenUpdate = millis();
+
+  if (ml == poprzednieMl) return;
+  poprzednieMl = ml;
+
+  display.clearDisplay();
+
+  display.drawRect(104, 3, 20, 10, SSD1306_WHITE);
+  display.fillRect(124, 5, 2, 6, SSD1306_WHITE);
+  display.fillRect(106, 5, 14, 6, SSD1306_WHITE);
+
+  display.setTextSize(5);
+  display.setCursor(10, 18);
+  display.print(ml);
+
+  display.setTextSize(3);
+  display.setCursor(78, 36);
+  display.print("mL");
+
+  display.display();
+}
+
+void ekranUstawiania() {
+}
+
+void ekranPozycjeKieliszkow() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setCursor(0, 0);
+  display.print("Znaleziono: ");
+  display.print(znalezionaLiczbaKieliszkow);
+
+  for (int i = 0; i < znalezionaLiczbaKieliszkow && i < 5; i++) {
+    display.setCursor(0, 12 + i * 10);
+    display.print(i + 1);
+    display.print(": ");
+    display.print(pozycjeSrodkow[i]);
+    display.print(" krok");
+  }
+
+  display.display();
+}
+
+void ekranSkanowanieDebug(int adc, bool wykryty) {
+  if (millis() - lastOledDebug < 150) return;
+  lastOledDebug = millis();
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setCursor(0, 0);
+  display.print("Skanowanie...");
+
+  display.setCursor(0, 12);
+  display.print("Poz: ");
+  display.print(aktualnaPozycjaSilnika);
+  display.print("/");
+  display.print(TOTAL_STEPS);
+
+  display.setCursor(0, 24);
+  display.print("ADC: ");
+  display.print(adc);
+
+  display.setCursor(0, 36);
+  display.print("P: ");
+  display.print(PROG_WEJSCIA);
+  display.print("/");
+  display.print(PROG_WYJSCIA);
+
+  display.setCursor(0, 48);
+  display.print("Kiel: ");
+  display.print(znalezionaLiczbaKieliszkow);
+  display.print(" ");
+
+  if (wykryty) {
+    display.print("TAK");
+  } else {
+    display.print("NIE");
+  }
+
+  display.display();
+}
+
+void ekranNalewanie() {
+  Serial.println("================================");
+  Serial.println("START EKRAN_NALEWANIE");
+  Serial.print("Liczba kieliszkow: ");
+  Serial.println(znalezionaLiczbaKieliszkow);
+  Serial.println("================================");
+
+  if (znalezionaLiczbaKieliszkow <= 0) {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+
+    display.setCursor(0, 20);
+    display.print("Brak kieliszkow");
+
+    display.setCursor(0, 36);
+    display.print("Skanuj ponownie");
+
+    display.display();
+
+    Serial.println("Brak kieliszkow - nalewanie przerwane");
+
+    delay(2000);
+    return;
+  }
+
+  for (int i = 0; i < znalezionaLiczbaKieliszkow; i++) {
+    long pozycjaKieliszka = pozycjeSrodkow[i];
+
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+
+    display.setCursor(0, 0);
+    display.print("Dojezdzam");
+
+    display.setCursor(0, 16);
+    display.print("Kieliszek: ");
+    display.print(i + 1);
+    display.print("/");
+    display.print(znalezionaLiczbaKieliszkow);
+
+    display.setCursor(0, 32);
+    display.print("Poz: ");
+    display.print(pozycjaKieliszka);
+
+    display.display();
+
+    Serial.print("Kieliszek nr ");
+    Serial.print(i + 1);
+    Serial.print(" | pozycja: ");
+    Serial.println(pozycjaKieliszka);
+
+    dojedzDoPozycji(pozycjaKieliszka);
+
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+
+    display.setCursor(0, 0);
+    display.print("Nalewanie");
+
+    display.setCursor(0, 16);
+    display.print("Kieliszek: ");
+    display.print(i + 1);
+    display.print("/");
+    display.print(znalezionaLiczbaKieliszkow);
+
+    display.setCursor(0, 32);
+    display.print("Ilosc: ");
+    display.print(ml);
+    display.print(" ml");
+
+    display.display();
+
+    nalejMl(ml);
+
+    delay(500);
+  }
+
+  Serial.println("Nalewanie zakonczone");
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setCursor(0, 20);
+  display.print("Nalewanie");
+
+  display.setCursor(0, 36);
+  display.print("zakonczone");
+
+  display.display();
+
+  delay(1500);
+}
+
+// ==== Fotorezystor i debug ====
+int odczytajFotoSrednio() {
+  long suma = 0;
+
+  for (int i = 0; i < LICZBA_PROBEK; i++) {
+    suma += analogRead(sensorPinAnalog);
+    delayMicroseconds(400);
+  }
+
+  return suma / LICZBA_PROBEK;
+}
+
+void pokazDebugSerial(int adc, bool wykryty) {
+  if (millis() - lastSerialDebug < 100) return;
+  lastSerialDebug = millis();
+
+  Serial.print("POZYCJA: ");
+  Serial.print(aktualnaPozycjaSilnika);
+
+  Serial.print(" | ADC: ");
+  Serial.print(adc);
+
+  Serial.print(" | WEJ: ");
+  Serial.print(PROG_WEJSCIA);
+
+  Serial.print(" | WYJ: ");
+  Serial.print(PROG_WYJSCIA);
+
+  Serial.print(" | WYKRYTY: ");
+
+  if (wykryty) {
+    Serial.print("TAK");
+  } else {
+    Serial.print("NIE");
+  }
+
+  Serial.print(" | LICZBA KIELISZKOW: ");
+  Serial.println(znalezionaLiczbaKieliszkow);
+}
+
+// ==== Pompa ====
+void nalejMl(int iloscMl) {
+  if (iloscMl <= 0) {
+    return;
+  }
+
+  unsigned long czasNalewania = (unsigned long)iloscMl * CZAS_NA_1_ML;
+
+  Serial.print("Nalewam: ");
+  Serial.print(iloscMl);
+  Serial.print(" ml | czas: ");
+  Serial.print(czasNalewania);
+  Serial.println(" ms");
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setCursor(0, 0);
+  display.print("Nalewanie");
+
+  display.setCursor(0, 18);
+  display.print("Ilosc: ");
+  display.print(iloscMl);
+  display.print(" ml");
+
+  display.setCursor(0, 34);
+  display.print("Czas: ");
+  display.print(czasNalewania);
+  display.print(" ms");
+
+  display.display();
+
+  digitalWrite(przekaznikIN2, HIGH);
+  delay(czasNalewania);
+  digitalWrite(przekaznikIN2, LOW);
+
+  delay(300);
+}
